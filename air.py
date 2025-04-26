@@ -1,18 +1,19 @@
-import sys
-import time
+from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.common.exceptions import NoSuchElementException
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
+from pymongo import MongoClient
+import os, time
 
-# Para mostrar caracteres como ñ y tildes correctamente
-sys.stdout.reconfigure(encoding='utf-8')
+# Cargar variables de entorno
+load_dotenv()
 
-# Configurar opciones de Chrome
+# Configurar Selenium
 chrome_options = Options()
 chrome_options.add_argument('--headless')
 chrome_options.add_argument('--no-sandbox')
@@ -22,104 +23,77 @@ chrome_options.add_argument('--window-size=1920,1080')
 chrome_options.add_argument('--disable-blink-features=AutomationControlled')
 chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
-# Iniciar WebDriver con las opciones configuradas
 driver = webdriver.Chrome(options=chrome_options)
 wait = WebDriverWait(driver, 15)
 
+# Conexión a MongoDB
+mongo_uri = os.environ.get("MONGO_URI")
+client = MongoClient(mongo_uri)
+db = client["test"]  # Asegúrate que es la base correcta en Railway
+hotels_col = db["hotels"]
+
 try:
-    # URL con los filtros deseados
-    url = ("https://www.airbnb.com.co/s/Bucaramanga--Santander/homes"
-           "?adults=2&children=2&infants=2&pets=2&check_in=2025-04-12&check_out=2025-04-13")
+    url = ("https://www.airbnb.com.co/s/Ibagué--Tolima/homes?refinement_paths%5B%5D=%2Fhomes&flexible_trip_lengths%5B%5D=one_week&monthly_start_date=2025-05-01&monthly_length=3&monthly_end_date=2025-08-01&price_filter_input_type=2&channel=EXPLORE&acp_id=88865183-8fb8-4e57-9bf9-d2bb636750ab&date_picker_type=calendar&checkin=2025-04-26&checkout=2025-04-30&source=structured_search_input_header&search_type=autocomplete_click&price_filter_num_nights=4&place_id=ChIJw4N9lwnEOI4RjnG5Vu4_b-E&location_bb=QJZfMcKV7jxAiDw2wpcLNw%3D%3D")
     driver.get(url)
 
-    # Esperar a que la página cargue y hacer scroll para cargar más resultados
-    print("Cargando resultados...")
-    for i in range(5):
+    print("🔎 Cargando resultados de Airbnb...")
+    for _ in range(5):
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(3)
 
-    # Esperar y obtener todas las tarjetas de alojamiento
     cards = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "[data-testid='card-container']")))
-    print(f"\n🔎 Se encontraron {len(cards)} alojamientos\n")
+    print(f"📌 Se encontraron {len(cards)} alojamientos\n")
 
-    # Procesar cada tarjeta
     for index, card in enumerate(cards, 1):
         try:
-            # Título
-            title = wait.until(lambda d: card.find_element(By.CSS_SELECTOR, "[data-testid='listing-card-name']")).text.strip()
+            title = card.find_element(By.CSS_SELECTOR, "[data-testid='listing-card-name']").text.strip()
             if not title:
                 continue
 
-            # Descripción
             try:
                 description = card.find_element(By.CSS_SELECTOR, "[data-testid='listing-card-title']").text.strip()
-            except NoSuchElementException:
+            except:
                 description = "N/A"
 
-            # Precio
             try:
-                price_elem = card.find_element(By.XPATH, ".//span[contains(text(), ' por noche')]")
-                price_text = price_elem.text.strip()
-                if "precio original" in price_text:
-                    parts = price_text.split("precio original")
-                    discounted_price = parts[0].split(" por noche")[0].strip()
-                    normal_price = parts[1].strip()
-                else:
-                    discounted_price = None
-                    normal_price = price_text.split(" por noche")[0].strip()
-            except NoSuchElementException:
-                continue
+                price_elem = card.find_element(By.CSS_SELECTOR, "div[style*='--pricing'] > div > span > div > span")
+                price_text = price_elem.text.strip().replace(" por noche", "").replace("$", "").replace(",", "")
+                price = float(price_text.split()[0]) if price_text else 0
+            except:
+                price = 0
 
-            # Tiempo de estadía
-            try:
-                link_elem = card.find_element(By.XPATH, ".//a[contains(@href, '/rooms/')]")
-                listing_url = link_elem.get_attribute('href')
-                params = parse_qs(urlparse(listing_url).query)
-                check_in = params.get('check_in', [None])[0]
-                check_out = params.get('check_out', [None])[0]
-                if check_in and check_out:
-                    d1 = datetime.strptime(check_in, "%Y-%m-%d")
-                    d2 = datetime.strptime(check_out, "%Y-%m-%d")
-                    nights = (d2 - d1).days
-                    stay_duration = f"{nights} noche{'s' if nights > 1 else ''}"
-            except Exception:
-                stay_duration = "N/A"
-
-            # Camas y habitaciones
-            try:
-                beds_elem = card.find_element(By.XPATH, ".//span[contains(text(), 'cama')]")
-                beds = beds_elem.text.strip()
-            except NoSuchElementException:
-                beds = "N/A"
-
-            # Calificación
             try:
                 rating_elem = card.find_element(By.XPATH, ".//span[contains(text(), 'Calificación promedio')]")
-                rating = rating_elem.text.replace("Calificación promedio: ", "").strip()
-            except NoSuchElementException:
-                rating = "Sin calificación"
+                rating = float(rating_elem.text.replace("Calificación promedio: ", "").strip())
+            except:
+                rating = 1.0
 
-            # Imprimir resultados
-            print(f"Alojamiento #{index}")
-            print("-" * 60)
-            print(f"Título: {title}")
-            print(f"Descripción: {description}")
-            if discounted_price:
-                print(f"Precio con descuento: {discounted_price}")
-                print(f"Precio normal: {normal_price}")
-            else:
-                print(f"Precio: {normal_price}")
-            print(f"Tiempo de estadía: {stay_duration}")
-            print(f"Número de camas: {beds}")
-            print(f"Calificación: {rating}")
-            print("-" * 60 + "\n")
+            try:
+                img_url = card.find_element(By.TAG_NAME, "img").get_attribute("src")
+            except:
+                img_url = None
+
+            hotel = {
+                "nombre": title,
+                "ciudad": "Bucaramanga",
+                "precio": price,
+                "rating": rating,
+                "descripcion": description,
+                "ubicacion": "",
+                "facilidades": [],
+                "opiniones": [],
+                "imagenes": [img_url] if img_url else []
+            }
+
+            hotels_col.insert_one(hotel)
+            print(f"✅ Guardado en MongoDB: {title}")
 
         except Exception as e:
-            print(f"Error procesando alojamiento: {str(e)}\n")
-            continue
+            print(f"❌ Error procesando alojamiento #{index}: {e}")
 
 except Exception as e:
-    print(f"Error general: {str(e)}")
+    print(f"❌ Error general: {e}")
 
 finally:
     driver.quit()
+    client.close()
